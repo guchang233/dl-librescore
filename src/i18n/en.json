@@ -1,5 +1,6 @@
 {
     "processing": "Processing…",
+    "human_verification_required": "Verify you are human…",
     "download": "Download {{fileType}}",
     "official_button": "Subscription required",
     "official_tooltip": "Official Scores require a MuseScore Pro+ subscription (free trial available) to download.",

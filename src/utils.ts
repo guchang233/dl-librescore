@@ -200,6 +200,35 @@ export const getUnsafeWindow = (): Window => {
     return window.eval("window") as Window;
 };
 
+/**
+ * Selectors of the human verification (CAPTCHA) widgets MuseScore may show.
+ *
+ * Scrolling through a score makes the viewer lazy-load its pages, which can
+ * make MuseScore ask the user to pass a human verification. Until it is
+ * passed, the requests for the individual pages are rejected.
+ */
+const HUMAN_VERIFICATION_SELECTORS = [
+    // Cloudflare Turnstile
+    'iframe[src*="challenges.cloudflare.com"]',
+    ".cf-turnstile",
+    '[id^="cf-chl-widget"]',
+    // other common providers
+    'iframe[src*="recaptcha/api2/anchor"]',
+    'iframe[src*="hcaptcha.com"]',
+].join(",");
+
+/** Whether a human verification (CAPTCHA) widget is currently shown on the page. */
+export const isHumanVerificationShown = (): boolean => {
+    if (typeof document === "undefined") {
+        return false;
+    }
+    try {
+        return document.querySelector(HUMAN_VERIFICATION_SELECTORS) !== null;
+    } catch {
+        return false;
+    }
+};
+
 export const console: Console = (
     typeof window !== "undefined" ? window : global
 ).console; // Object.is(window.console, unsafeWindow.console) == false

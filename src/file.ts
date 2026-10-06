@@ -2,8 +2,13 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return */
 
 import md5 from "md5";
-import { getFetch } from "./utils";
+import { getFetch, isHumanVerificationShown } from "./utils";
 import { auths } from "./file-magics";
+import i18nextInit, { i18next } from "./i18n/index";
+
+(async () => {
+    await i18nextInit;
+})();
 
 export type FileType = "img" | "mp3" | "midi";
 
@@ -55,14 +60,68 @@ const getApiAuth = async (
     return md5(code).slice(0, 4);
 };
 
-let imgInProgress = false;
+let scoreScrollPromise: Promise<void> | null = null;
+
+/**
+ * Scroll through every page of the score.
+ *
+ * The viewer lazy-loads each page as it scrolls into view, and obtains the
+ * download token of that page through its own requests along the way. The
+ * score therefore has to be scrolled through before those tokens can be read,
+ * and scrolling is also what makes MuseScore ask for a human verification.
+ *
+ * Callers that need different pages at the same time share one scroll pass.
+ */
+const scrollThroughScore = (pageCount = 0): Promise<void> => {
+    if (!scoreScrollPromise) {
+        scoreScrollPromise = new Promise<void>((resolve) => {
+            const parentDiv = document.querySelector(
+                "#jmuse-scroller-component"
+            );
+
+            if (!parentDiv) {
+                resolve();
+                return;
+            }
+
+            const pageCooldown = 25;
+            let i = 0;
+
+            const scrollToNextChild = (): void => {
+                // the viewer appends the pages while scrolling, so the page
+                // count has to be re-read instead of being fixed upfront
+                const target = pageCount
+                    ? Math.min(parentDiv.children.length, pageCount + 3)
+                    : parentDiv.children.length;
+
+                parentDiv.children[i]?.scrollIntoView();
+
+                i++;
+
+                if (i < target) {
+                    setTimeout(scrollToNextChild, pageCooldown);
+                } else {
+                    resolve();
+                }
+            };
+
+            scrollToNextChild();
+        }).finally(() => {
+            scoreScrollPromise = null;
+        });
+    }
+
+    return scoreScrollPromise;
+};
 
 const getApiAuthNetwork = async (
     type: FileType,
-    index: number
+    index: number,
+    pageCount = 0,
+    setText?: (str: string) => void
 ): Promise<string> => {
-    let numPages = 0;
-    let pageCooldown = 25;
+    let numPages = pageCount;
+    const pageCooldown = 25;
     if (!auths[type + index]) {
         try {
             switch (type) {
@@ -127,31 +186,16 @@ const getApiAuthNetwork = async (
                     break;
                 }
                 case "img": {
-                    if (!imgInProgress) {
-                        imgInProgress = true;
-                        let parentDiv = document.querySelector(
-                            "#jmuse-scroller-component"
-                        )!;
+                    numPages = Math.max(
+                        pageCount,
+                        document.querySelector("#jmuse-scroller-component")
+                            ?.children.length ?? 0
+                    );
 
-                        numPages = parentDiv.children.length - 3;
-                        let i = 0;
-
-                        function scrollToNextChild() {
-                            let childDiv = parentDiv.children[i];
-                            if (childDiv) {
-                                childDiv.scrollIntoView();
-                            }
-
-                            i++;
-
-                            if (i < numPages) {
-                                setTimeout(scrollToNextChild, pageCooldown);
-                            }
-                        }
-
-                        scrollToNextChild();
-                    }
-                    imgInProgress = false;
+                    // scroll through the whole score so that the viewer loads
+                    // every page, and so that a human verification is triggered
+                    // before the download is attempted
+                    await scrollThroughScore(pageCount);
                     break;
                 }
             }
@@ -163,19 +207,19 @@ const getApiAuthNetwork = async (
 
     try {
         return new Promise((resolve, reject) => {
-            let timer = setTimeout(
-                () => {
-                    reject(new Error("token timeout"));
-                },
-                type === "img"
-                    ? numPages * pageCooldown * 2 + 2100
-                    : 5 * 1000 /* 5s */
-            );
+            const baseTimeout =
+                type === "img" ? numPages * pageCooldown * 2 + 2100 : 5 * 1000;
+
+            // While the human verification is shown, keep extending the
+            // deadline so that the user has time to pass it. Without this the
+            // download fails silently and produces an incomplete PDF.
+            const verificationTimeout = 2 * 60 * 1000; /* 2min */
+            let deadline = Date.now() + baseTimeout;
+            let notified = false;
 
             // Check the auths object periodically
-            let interval = setInterval(() => {
-                if (auths.hasOwnProperty(type + index)) {
-                    clearTimeout(timer);
+            const interval = setInterval(() => {
+                if (Object.prototype.hasOwnProperty.call(auths, type + index)) {
                     clearInterval(interval);
                     setInterval(
                         () => {
@@ -184,6 +228,22 @@ const getApiAuthNetwork = async (
                         // long delay for images to give time for them to load fully
                         type === "img" ? 2000 : 100
                     );
+                    return;
+                }
+
+                if (type === "img" && isHumanVerificationShown()) {
+                    deadline = Date.now() + verificationTimeout;
+
+                    if (setText && !notified) {
+                        notified = true;
+                        setText(i18next.t("human_verification_required"));
+                    }
+                }
+
+                if (Date.now() > deadline) {
+                    clearInterval(interval);
+                    console.error(type, "token timeout");
+                    reject(new Error("token timeout"));
                 }
             }, 100);
         });
@@ -224,7 +284,7 @@ export const getFileUrl = async (
         });
 
         if (!r.ok) {
-            auth = await getApiAuthNetwork(type, index);
+            auth = await getApiAuthNetwork(type, index, pageCount, setText);
             if (type === "img" && index === 0) {
                 // auth is the URL for the first page
                 r = await _fetch(auth);

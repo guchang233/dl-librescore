@@ -109,7 +109,10 @@ const main = (): void => {
                     },
 
                     fallback,
-                    3 * 60 * 1000 /* 3min */
+                    // the score has to be scrolled through before the PDF can
+                    // be built, and the user may have to pass a human
+                    // verification while it is being scrolled
+                    5 * 60 * 1000 /* 5min */
                 ),
             });
         }
